@@ -1,0 +1,72 @@
+name: Anti-Spam Pull Request Bot
+
+on:
+  pull_request:
+    types: [opened, reopened, edited, synchronize]
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  detect-spam:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Fetch PR details
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const files = await github.paginate(
+              github.rest.pulls.listFiles,
+              { owner: context.repo.owner, repo: context.repo.repo, pull_number: pr.number }
+            );
+
+            // Heuristics
+            let score = 0;
+            if (pr.commits === 1) score++;
+            if (files.length === 1) score++;
+            const smallChange = files.every(f => (f.additions + f.deletions) < 5);
+            if (smallChange) score++;
+            const readmeOnly = files.every(f => f.filename.match(/readme|contributing|license|\.md|\.txt/i));
+            if (readmeOnly) score++;
+            const spamKeywords = /(add\s+name|update\s+readme|testing|hello|hacktober|my\s+name)/i;
+            if (pr.title.match(spamKeywords) || pr.body.match(spamKeywords)) score++;
+
+            console.log(`Spam score for PR #${pr.number}: ${score}`);
+
+            core.setOutput('score', score);
+            core.setOutput('pr_number', pr.number);
+
+      - name: Mark as spam or close
+        if: steps.pr.outputs.score > 2
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = parseInt(core.getInput('pr_number'));
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              labels: ['spam-pr']
+            });
+
+            // Optional: auto-close the PR
+            await github.rest.pulls.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+              state: 'closed'
+            });
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body: '🚫 This pull request appears to be spam or trivial. It has been automatically closed. If you believe this is a mistake, please comment below.'
+            });
